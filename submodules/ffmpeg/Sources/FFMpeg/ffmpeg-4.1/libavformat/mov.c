@@ -7645,15 +7645,16 @@ static int mov_switch_root(AVFormatContext *s, int64_t target, int index)
 
     if (index >= 0 && index < mov->frag_index.nb_items)
         target = mov->frag_index.item[index].moof_offset;
-    if (avio_seek(s->pb, target, SEEK_SET) != target) {
+    if (target >= 0 && avio_seek(s->pb, target, SEEK_SET) != target) {
         av_log(mov->fc, AV_LOG_ERROR, "root atom offset 0x%"PRIx64": partial file\n", target);
         return AVERROR_INVALIDDATA;
     }
 
     mov->next_root_atom = 0;
-    if (index < 0 || index >= mov->frag_index.nb_items)
+    if ((index < 0 && target >= 0) || index >= mov->frag_index.nb_items)
         index = search_frag_moof_offset(&mov->frag_index, target);
-    if (index < mov->frag_index.nb_items) {
+    if (index >= 0 && index < mov->frag_index.nb_items &&
+         mov->frag_index.item[index].moof_offset == target) {
         if (index + 1 < mov->frag_index.nb_items)
             mov->next_root_atom = mov->frag_index.item[index + 1].moof_offset;
         if (mov->frag_index.item[index].headers_read)
@@ -7907,6 +7908,37 @@ static int mov_read_seek(AVFormatContext *s, int stream_index, int64_t sample_ti
     AVStream *st;
     int sample;
     int i;
+
+    if (s->pb->pos == 0) {
+        // Discard current fragment index
+        if (mc->frag_index.allocated_size > 0) {
+            av_freep(&mc->frag_index.item);
+            mc->frag_index.nb_items = 0;
+            mc->frag_index.allocated_size = 0;
+            mc->frag_index.current = -1;
+            mc->frag_index.complete = 0;
+        }
+        
+
+        for (i = 0; i < s->nb_streams; i++) {
+            AVStream *avst = s->streams[i];
+            MOVStreamContext *msc = avst->priv_data;
+
+            // Clear current sample
+            mov_current_sample_set(msc, 0);
+
+            // Discard current index entries
+            if (avst->index_entries_allocated_size > 0) {
+                av_freep(&avst->index_entries);
+                avst->index_entries_allocated_size = 0;
+                avst->nb_index_entries = 0;
+            }
+        }
+
+        int ret;
+        if ((ret = mov_switch_root(s, -1, -1)) < 0)
+            return ret;
+    }
 
     if (stream_index >= s->nb_streams)
         return AVERROR_INVALIDDATA;
