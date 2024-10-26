@@ -38,17 +38,19 @@ LIB_NAMES="libavcodec libavformat libavutil libswresample"
 set -e
 
 CONFIGURE_FLAGS="--enable-cross-compile --disable-programs \
-				 --disable-armv5te --disable-armv6 --disable-armv6t2 \
+				 				 --disable-armv5te --disable-armv6 --disable-armv6t2 \
                  --disable-doc --enable-pic --disable-all --disable-everything \
                  --enable-avcodec  \
                  --enable-swresample \
                  --enable-avformat \
                  --disable-xlib \
                  --enable-libopus \
-				 --enable-libvpx \
+				 				 --enable-libvpx \
                  --enable-audiotoolbox \
+								 --enable-videotoolbox \
                  --enable-bsf=aac_adtstoasc,vp9_superframe,h264_mp4toannexb \
-                 --enable-decoder=h264,libvpx_vp9,hevc,libopus,mp3,aac,flac,alac_at,pcm_s16le,pcm_s24le,pcm_f32le,gsm_ms_at \
+								 --enable-hwaccel=h264_videotoolbox \
+                 --enable-decoder=h264,h264_videotoolbox,libvpx_vp9,hevc,libopus,mp3,aac,flac,alac_at,pcm_s16le,pcm_s24le,pcm_f32le,gsm_ms_at \
                  --enable-encoder=libvpx_vp9,aac_at \
                  --enable-demuxer=aac,mov,m4v,mp3,ogg,libopus,flac,wav,aiff,matroska,mpegts,hls \
                  --enable-parser=aac,h264,mp3,libopus \
