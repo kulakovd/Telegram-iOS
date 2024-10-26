@@ -2014,7 +2014,7 @@ static int recheck_discard_flags(AVFormatContext *s, int first)
                 pls->seek_stream_index = -1;
             }
             av_log(s, AV_LOG_INFO, "Now receiving playlist %d, segment %d\n", i, pls->cur_seq_no);
-        } else if (first && !cur_needed && pls->needed) {
+        } else if (!cur_needed && pls->needed) {
             if (pls->input)
                 ff_format_io_close(pls->parent, &pls->input);
             pls->input_read_done = 0;
@@ -2255,8 +2255,11 @@ static int hls_read_seek(AVFormatContext *s, int stream_index,
         pls->seek_timestamp = seek_timestamp;
         pls->seek_flags = flags;
 
-        // seek in subdemuxer
-        av_seek_frame(pls->ctx, -1, seek_timestamp, flags);
+        pls->needed = playlist_needed(pls);
+        if (pls->needed) {
+            // seek in subdemuxer
+            av_seek_frame(pls->ctx, -1, seek_timestamp, flags);
+        }
 
         if (pls != seek_pls) {
             /* set closest segment seq_no for playlists not handled above */
