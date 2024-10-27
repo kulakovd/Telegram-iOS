@@ -373,7 +373,7 @@ void ioCustomClose(struct AVFormatContext *s, AVIOContext *pb) {
     
     [self printVersions];
     
-    av_log_set_level(AV_LOG_VERBOSE);
+    av_log_set_level(AV_LOG_INFO);
     
     self.master = [Playlist fromUrl:[NSURL URLWithString:url]];
     self.speedMeasurer = [[SpeedMeasurer alloc] initWithPlaylist:self.master];
@@ -564,8 +564,8 @@ void ioCustomClose(struct AVFormatContext *s, AVIOContext *pb) {
     dispatch_sync(_decodingQueue, ^{
         [self clearBuffer: _readyVideoFramesBuffer];
         [self clearBuffer: _readyAudioFramesBuffer];
-        printf("===\n SEEK flush buffers\n");
-        [self printBufferSizes];
+        self.isPlaybackBufferEmpty = true;
+        self.isPlaybackBufferFull = false;
         
         avcodec_flush_buffers(_videoCodecCtx);
         avcodec_flush_buffers(_audioCodecCtx);
