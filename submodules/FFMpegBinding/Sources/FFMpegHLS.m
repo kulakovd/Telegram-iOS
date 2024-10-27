@@ -73,6 +73,9 @@ enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *
 }
 
 - (int) open: (NSString*) url {
+    _hasMoreVideoFrames = true;
+    _hasMoreAudioFrames = true;
+    
     // notify player
     self.isPlaybackBufferEmpty = true;
     
@@ -90,9 +93,6 @@ enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *
         av_log(NULL, AV_LOG_ERROR, "Could not open input file: %s\n%s\n", urlStr, av_err2str(err));
         return -1;
     }
-    
-    _hasMoreVideoFrames = true;
-    _hasMoreAudioFrames = true;
     
     _videoStreamIndex = 0;
     _audioStreamIndex = 1;
@@ -188,6 +188,10 @@ enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *
 
 - (NSInteger) quality {
     return _quality;
+}
+
+- (Boolean) finished {
+    return self.eof;
 }
 
 - (Boolean) hasMoreVideoFrames {

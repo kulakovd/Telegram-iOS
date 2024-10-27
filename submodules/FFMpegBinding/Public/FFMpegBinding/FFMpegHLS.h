@@ -8,6 +8,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (int) open:(NSString*)url;
 
+- (Boolean) finished;
+
 - (Boolean) hasMoreVideoFrames;
 
 - (CMSampleBufferRef _Nullable) getNextVideoFrame;

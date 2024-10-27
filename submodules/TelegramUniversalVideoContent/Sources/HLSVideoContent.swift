@@ -478,6 +478,9 @@ private final class HLSVideoContentNode: ASDisplayNode, UniversalVideoContentNod
         self.hlsClient.removeObserver(self, forKeyPath: "playbackBufferEmpty")
         self.hlsClient.removeObserver(self, forKeyPath: "playbackBufferFull")
         
+        self.videoLayer.stopRequestingMediaData()
+        self.audioRenderer.stopRequestingMediaData()
+        
         self.audioSessionDisposable.dispose()
         
         self.serverDisposable?.dispose()
@@ -535,7 +538,7 @@ private final class HLSVideoContentNode: ASDisplayNode, UniversalVideoContentNod
             }
             self.updateStatus()
         } else if keyPath == "playbackBufferEmpty" {
-            if let isEmpty = change?[.newKey] as? Bool, isEmpty {
+            if let isEmpty = change?[.newKey] as? Bool, isEmpty && !self.hlsClient.finished() {
                 self.isBuffering = true
                 self.synchronizer.rate = 0.0
                 self.updateStatus()
