@@ -652,7 +652,7 @@ static int open_url(AVFormatContext *s, AVIOContext **pb, const char *url,
     else if (strcmp(proto_name, "file") || !strncmp(url, "file,", 5))
         return AVERROR_INVALIDDATA;
 
-    if (is_http && c->http_persistent && *pb) {
+    if (is_http && c->http_persistent && *pb && !(s->flags & AVFMT_FLAG_CUSTOM_IO)) {
         ret = open_url_keepalive(c->ctx, pb, url);
         if (ret == AVERROR_EXIT) {
             return ret;
@@ -708,7 +708,7 @@ static int parse_playlist(HLSContext *c, const char *url,
     int prev_n_segments = 0;
     int prev_start_seq_no = -1;
 
-    if (is_http && !in && c->http_persistent && c->playlist_pb) {
+    if (is_http && !in && c->http_persistent && c->playlist_pb && !(c->ctx->flags & AVFMT_FLAG_CUSTOM_IO)) {
         in = c->playlist_pb;
         ret = open_url_keepalive(c->ctx, &c->playlist_pb, url);
         if (ret == AVERROR_EXIT) {
