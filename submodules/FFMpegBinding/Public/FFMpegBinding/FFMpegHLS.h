@@ -24,6 +24,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property NSInteger quality;
 
+@property NSInteger currectQuality;
+
 @end
 
 NS_ASSUME_NONNULL_END

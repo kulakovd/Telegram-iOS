@@ -700,7 +700,7 @@ private final class HLSVideoContentNode: ASDisplayNode, UniversalVideoContentNod
         guard let playerSource = self.playerSource else {
             return nil
         }
-        let current = Int(self.videoLayer.frame.height)
+        let current = Int(self.hlsClient.quality)
         var available: [Int] = Array(playerSource.qualityFiles.keys)
         available.sort(by: { $0 > $1 })
         return (current, self.preferredVideoQuality, available)

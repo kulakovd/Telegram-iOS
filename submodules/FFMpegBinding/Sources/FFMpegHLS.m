@@ -1,5 +1,6 @@
 #import <FFMpegBinding/FFMpegHLS.h>
 
+#import <Foundation/Foundation.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreFoundation/CoreFoundation.h>
 
@@ -11,6 +12,7 @@
 #include "libswresample/swresample.h"
 
 #define BUFFER_SIZE_SECONDS 3
+#define AVIO_BUFFER_SIZE 4096
 
 enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
     for (const enum AVPixelFormat *p = pix_fmts; *p != -1; p++) {
@@ -20,6 +22,292 @@ enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *
     }
     fprintf(stderr, "Cannot find VideoToolbox pixel format\n");
     return AV_PIX_FMT_NONE;
+}
+
+@interface Variant : NSObject
+
+@property NSInteger bandwidth;
+@property NSInteger width;
+@property NSInteger height;
+@property NSURL *url;
+
+- (instancetype)initWithAttributes:(NSString *)input;
+@end
+
+@implementation Variant
+- (instancetype)initWithAttributes:(NSString *)input {
+    self = [super init];
+    if (self) {
+        // "BANDWIDTH=2074088,RESOLUTION=1920x1080"
+        NSArray *items = [input componentsSeparatedByString:@","];
+
+        for (NSString *item in items) {
+            NSArray *parts = [item componentsSeparatedByString:@"="];
+            if (parts.count == 2) {
+                NSString *key = parts[0];
+                NSString *val = parts[1];
+                if ([key isEqualToString: @"BANDWIDTH"]) {
+                    self.bandwidth = [val integerValue];
+                }
+                else if ([key isEqualToString: @"RESOLUTION"]) {
+                    NSArray *resolutionParts = [val componentsSeparatedByString:@"x"];
+                    if (resolutionParts.count == 2) {
+                        NSString *w = resolutionParts[0];
+                        NSString *h = resolutionParts[1];
+                        self.width = [w integerValue];
+                        self.height = [h integerValue];
+                    }
+                }
+            }
+        };
+    }
+    return self;
+}
+
+- (char *)getStringURL {
+    return strdup([[self.url absoluteString] UTF8String]);
+}
+@end
+
+@interface Playlist : NSObject
+
+@property NSURL *url;
+@property (nonatomic, strong) NSMutableArray<Variant *> *variants;
+
+- (instancetype)initWithString:(NSString *)input;
++ (instancetype)fromUrl:(NSURL *)url;
+
+@end
+
+@implementation Playlist
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        self.variants = [NSMutableArray array]; // Инициализация пустого массива
+    }
+    return self;
+}
+
+- (instancetype)initWithString:(NSString *)input {
+    self = [self init];
+    if (self) {
+        __block bool isVariant = false;
+//        __block bool isSegment = false;
+        __block Variant *variant;
+        
+        [input enumerateLinesUsingBlock:^(NSString *item, bool *stop){
+            NSArray *parts = [item componentsSeparatedByString:@":"];
+            if (parts.count == 2) {
+                NSString *key = parts[0];
+                NSString *val = parts[1];
+                if ([key isEqualToString: @"#EXT-X-STREAM-INF"]) {
+                    isVariant = true;
+                    variant = [[Variant alloc] initWithAttributes:val];
+                }
+            } else if (parts.count == 1) {
+                NSString *val = parts[0];
+                if (isVariant) {
+                    NSURL *newURL = [[self.url URLByDeletingLastPathComponent] URLByAppendingPathComponent:val];
+                    variant.url = newURL;
+                    [self.variants addObject:variant];
+                    isVariant = false;
+                }
+            }
+        }];
+    }
+    return self;
+}
+
++ (instancetype)fromUrl:(NSURL *)url {
+    __block Playlist *playlist = [Playlist alloc];
+    playlist.url = url;
+    
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDataTask *task = [session dataTaskWithURL:url
+                                        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error) {
+            NSLog(@"Error: %@", error);
+        } else {
+            NSString *responseString = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            playlist = [playlist initWithString:responseString];
+        }
+        
+        dispatch_semaphore_signal(sem);
+    }];
+    
+    [task resume];
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    
+    return playlist;
+}
+
+@end
+
+@interface SpeedMeasurer : NSObject
+
+@property (nonatomic, strong) Playlist *playlist;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *measurements;
+@property (nonatomic, assign) NSInteger maxMeasurements;
+@property (nonatomic, strong) Variant *currentVariant;
+
+@property (nonatomic, copy) void (^qualityChangeHandler)(Variant *newVariant);
+
+- (instancetype)initWithPlaylist:(Playlist *)playlist;
+- (void)addMeasurement:(int)bps;
+
+@end
+
+@implementation SpeedMeasurer
+
+- (instancetype)initWithPlaylist:(Playlist *)playlist {
+    self = [super init];
+    if (self) {
+        _playlist = playlist;
+        _measurements = [NSMutableArray array];
+        _maxMeasurements = 5;
+        _currentVariant = playlist.variants.firstObject;
+    }
+    return self;
+}
+
+- (void)addMeasurement:(int)bps {
+    [self.measurements addObject:@(bps)];
+    if (self.measurements.count > self.maxMeasurements) {
+        [self.measurements removeObjectAtIndex:0];
+    }
+    
+    Variant *recommendedVariant = [self selectVariantForCurrentSpeed];
+    if (recommendedVariant != self.currentVariant) {
+        self.currentVariant = recommendedVariant;
+        if (self.qualityChangeHandler) {
+            self.qualityChangeHandler(recommendedVariant);
+        }
+    }
+}
+
+- (double)averageSpeed {
+    double sum = 0;
+    for (NSNumber *measurement in self.measurements) {
+        sum += measurement.doubleValue;
+    }
+    return (self.measurements.count > 0) ? sum / self.measurements.count : 0;
+}
+
+- (Variant *)selectVariantForCurrentSpeed {
+    double avgSpeed = [self averageSpeed];
+    
+    NSArray *sortedVariants = [self.playlist.variants sortedArrayUsingComparator:^NSComparisonResult(Variant *v1, Variant *v2) {
+        return [@(v1.bandwidth) compare:@(v2.bandwidth)];
+    }];
+    
+    Variant *selectedVariant = sortedVariants.firstObject;
+    for (Variant *variant in sortedVariants) {
+        if (avgSpeed >= variant.bandwidth) {
+            selectedVariant = variant;
+        } else {
+            break;
+        }
+    }
+    
+//    printf("AUTO SELECTED VARIANT: %d, SPEED: %d", (int)selectedVariant.bandwidth, (int)avgSpeed);
+    return selectedVariant;
+}
+
+@end
+
+struct IOCustomCtx {
+    NSData *data;
+    NSUInteger offset;
+};
+
+int ioCustomRead(void *opaque, uint8_t *buf, int buf_size) {
+    struct IOCustomCtx *ctx = (struct IOCustomCtx *)opaque;
+
+    // Check if we've reached the end of the data
+    NSUInteger dataLength = [ctx->data length];
+    if (ctx->offset >= dataLength) {
+        return AVERROR_EOF;
+    }
+
+    int copySize = (int)MIN(buf_size, dataLength - ctx->offset);
+
+    [ctx->data getBytes:buf range:NSMakeRange(ctx->offset, copySize)];
+    ctx->offset += copySize;
+
+    return copySize;
+}
+
+int ioCustomOpen(struct AVFormatContext *s, AVIOContext **pb, const char *url,
+                 int flags, AVDictionary **options) {
+    SpeedMeasurer *speedMeasurer = (__bridge SpeedMeasurer *)s->opaque;
+    
+    NSURL *reqUrl = [NSURL URLWithString:[NSString stringWithUTF8String:url]];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:reqUrl];
+    
+    // Extract `offset` and `end_offset` values from `options`
+    AVDictionaryEntry *offsetEntry = av_dict_get(*options, "offset", NULL, 0);
+    AVDictionaryEntry *endOffsetEntry = av_dict_get(*options, "end_offset", NULL, 0);
+    
+    if (offsetEntry && endOffsetEntry) {
+        int offset = atoi(offsetEntry->value);
+        int endOffset = atoi(endOffsetEntry->value);
+        
+        // Create the byte range header value
+        NSString *rangeValue = [NSString stringWithFormat:@"bytes=%d-%d", offset, endOffset];
+        
+        // Set the byte range header
+        [request setValue:rangeValue forHTTPHeaderField:@"Range"];
+    }
+    
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURLSession *session = [NSURLSession sharedSession];
+    
+    __block NSData *data = nil;
+    
+    NSLog(@"Request: %s", url);
+    
+    // Start the timer
+    NSDate *startTime = [NSDate date];
+
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *resData, NSURLResponse *response, NSError *error) {
+        data = resData;
+        if (error) {
+            NSLog(@"Error: %@", error);
+        }
+        
+        dispatch_semaphore_signal(sem);
+    }];
+
+    [task resume];
+    
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    
+    // Stop the timer and calculate elapsed time in seconds
+    NSTimeInterval elapsedTime = [[NSDate date] timeIntervalSinceDate:startTime];
+
+    // Calculate download speed in bits per second
+    NSUInteger dataSizeInBits = [data length] * 8;
+    double speedBps = dataSizeInBits / elapsedTime;
+    [speedMeasurer addMeasurement: speedBps];
+    NSLog(@"Download speed: %.2f bits per second", speedBps);
+    
+    struct IOCustomCtx *ctx = malloc(sizeof(struct IOCustomCtx));
+    ctx->data = data;
+    ctx->offset = 0;
+    
+    uint8_t *avio_buffer = av_malloc(AVIO_BUFFER_SIZE);
+    AVIOContext *avio_ctx = avio_alloc_context(avio_buffer, AVIO_BUFFER_SIZE, 0, ctx, ioCustomRead, NULL, NULL);
+    
+    avio_ctx->opaque = ctx;
+    *pb = avio_ctx;
+    
+    return 0;
+}
+
+void ioCustomClose(struct AVFormatContext *s, AVIOContext *pb) {
+    av_free(pb->buffer);
+    avio_context_free(&pb);
 }
 
 @interface FFMpegHLS () {
@@ -53,11 +341,15 @@ enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *
 @property bool eof;
 @property bool isBuffering;
 
+@property Playlist *master;
+@property SpeedMeasurer *speedMeasurer;
+
 @end
 
 @implementation FFMpegHLS
 
 @synthesize quality = _quality;
+@synthesize currectQuality = _currectQuality;
 
 - (instancetype) init {
     self = [super init];
@@ -81,14 +373,20 @@ enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *
     
     [self printVersions];
     
-    av_log_set_level(AV_LOG_INFO);
+    av_log_set_level(AV_LOG_VERBOSE);
+    
+    self.master = [Playlist fromUrl:[NSURL URLWithString:url]];
+    self.speedMeasurer = [[SpeedMeasurer alloc] initWithPlaylist:self.master];
     
     const char* urlStr = [url UTF8String];
     
-    _fmtCtx = NULL;
-    int err = 0;
+    _fmtCtx = avformat_alloc_context();
+    _fmtCtx->io_open = ioCustomOpen;
+    _fmtCtx->io_close = ioCustomClose;
+    _fmtCtx->flags |= AVFMT_FLAG_CUSTOM_IO;
+    _fmtCtx->opaque = (__bridge void *)(self.speedMeasurer);
     
-    err = avformat_open_input(&_fmtCtx, urlStr, NULL, NULL);
+    int err = avformat_open_input(&_fmtCtx, urlStr, NULL, NULL);
     if (err < 0) {
         av_log(NULL, AV_LOG_ERROR, "Could not open input file: %s\n%s\n", urlStr, av_err2str(err));
         return -1;
@@ -96,6 +394,7 @@ enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *
     
     _videoStreamIndex = 0;
     _audioStreamIndex = 1;
+    _currectQuality = [self.master.variants objectAtIndex:0].height;
     
     err = avformat_find_stream_info(_fmtCtx, NULL);
     if (err < 0) {
@@ -121,6 +420,13 @@ enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *
         swr_init(_swrCtx);
     }
     
+    __weak typeof(self) weakSelf = self;
+    self.speedMeasurer.qualityChangeHandler = ^(Variant *newVariant) {
+        if (weakSelf.quality == -1) {
+            [weakSelf switchToVariant:newVariant];
+        }
+    };
+    
     [self fillBuffer];
     
     return 0;
@@ -139,47 +445,62 @@ enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *
 - (void) setQuality:(NSInteger)quality {
     _quality = quality;
     printf("SET QUALITY %lld\n", (int64_t)quality);
-    self.isStopDecodingRequested = true;
-    dispatch_async(_decodingQueue, ^{
-        int newVideoStreamIndex = -1;
-        int newAudioStreamIndex = -1;
-        NSInteger targetProgramIndex = [self.qualities indexOfObject:@(quality)];
-        
-        AVProgram *program = _fmtCtx->programs[targetProgramIndex];
-        for (unsigned int j = 0; j < program->nb_stream_indexes; j++) {
-            int stream_index = program->stream_index[j];
-            AVStream *stream = _fmtCtx->streams[stream_index];
-            
-            if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-                newVideoStreamIndex = stream_index;
-            } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-                newAudioStreamIndex = stream_index;
-            }
-            
-            if (newVideoStreamIndex != -1 && newAudioStreamIndex != -1) {
-                break;
-            }
-        }
-        
-        _videoStreamIndex = newVideoStreamIndex;
-        _audioStreamIndex = newAudioStreamIndex;
-        
-        [self selectStreams];
+    if (quality != -1) {
+        _currectQuality = quality;
+        self.isStopDecodingRequested = true;
+        dispatch_async(_decodingQueue, ^{
+            NSInteger targetProgramIndex = [self.qualities indexOfObject:@(quality)];
+            [self switchToProgram:targetProgramIndex];
+        });
+    }
+}
 
-        avformat_flush(_fmtCtx);
+- (void) switchToVariant:(Variant *) variant {
+    _currectQuality = variant.height;
+    dispatch_async(_decodingQueue, ^{
+        NSInteger targetProgramIndex = [self.master.variants indexOfObject:variant];
+        [self switchToProgram:targetProgramIndex];
+    });
+}
+
+- (void) switchToProgram:(NSInteger) targetProgramIndex {
+    int newVideoStreamIndex = -1;
+    int newAudioStreamIndex = -1;
+    
+    AVProgram *program = _fmtCtx->programs[targetProgramIndex];
+    for (unsigned int j = 0; j < program->nb_stream_indexes; j++) {
+        int stream_index = program->stream_index[j];
+        AVStream *stream = _fmtCtx->streams[stream_index];
         
-        int err = av_seek_frame(_fmtCtx, _videoStreamIndex, self.lastKeyframe, AVSEEK_FLAG_BACKWARD);
-        if (err < 0) {
-            av_log(NULL, AV_LOG_ERROR, "Seek frame failed.\n%s\n", av_err2str(err));
-            return;
+        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            newVideoStreamIndex = stream_index;
+        } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            newAudioStreamIndex = stream_index;
         }
         
-        [self deinitCodecs];
-        [self initCodecs];
-        
-        self.isStopDecodingRequested = false;
-        [self fillBuffer];
-    });
+        if (newVideoStreamIndex != -1 && newAudioStreamIndex != -1) {
+            break;
+        }
+    }
+    
+    _videoStreamIndex = newVideoStreamIndex;
+    _audioStreamIndex = newAudioStreamIndex;
+    
+    [self selectStreams];
+
+    avformat_flush(_fmtCtx);
+    
+    int err = av_seek_frame(_fmtCtx, _videoStreamIndex, self.lastKeyframe, AVSEEK_FLAG_BACKWARD);
+    if (err < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Seek frame failed.\n%s\n", av_err2str(err));
+        return;
+    }
+    
+    [self deinitCodecs];
+    [self initCodecs];
+    
+    self.isStopDecodingRequested = false;
+    [self fillBuffer];
 }
 
 - (void) setupAvailableQualities:(NSArray<NSNumber *> *)qualities {
